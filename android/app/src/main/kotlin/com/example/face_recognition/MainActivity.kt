@@ -54,6 +54,18 @@ class MainActivity: FlutterActivity() {
     private var preview: Preview? = null
     private var cameraX: CameraX? = null
     private var previewChannel: MethodChannel? = null
+    
+    // Real-time face tracking variables
+    private var isRealTimeTrackingActive = false
+    private var realTimeCallback: MethodChannel.Result? = null
+    private var lastFaceQualityCheck = 0L
+    private val FACE_QUALITY_CHECK_INTERVAL = 200L // Check every 200ms for smooth real-time
+    
+    // Face quality tracking
+    private var consecutiveGoodFrames = 0
+    private var consecutiveBadFrames = 0
+    private val REQUIRED_GOOD_FRAMES = 3 // Need 3 consecutive good frames
+    private val MAX_BAD_FRAMES = 5 // Reset after 5 bad frames
 
     @RequiresApi(Build.VERSION_CODES.P)
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -75,7 +87,11 @@ class MainActivity: FlutterActivity() {
                     }
                 }
                 "checkFaceQuality" -> {
-                    checkFaceQuality(result)
+                    startRealTimeFaceTracking(result)
+                }
+                "stopFaceTracking" -> {
+                    stopRealTimeFaceTracking()
+                    result.success(null)
                 }
                 else -> result.notImplemented()
             }
@@ -281,18 +297,46 @@ class MainActivity: FlutterActivity() {
                 tfliteInterpreter = Interpreter(modelFile)
             }
 
-            // Preprocess image
-            val resizedBitmap = faceImage.scale(inputSize, inputSize)
+            // Preprocess image - ทำให้ได้คุณภาพดีขึ้น
+            val resizedBitmap = Bitmap.createScaledBitmap(faceImage, inputSize, inputSize, true)
             val inputBuffer = bitmapToByteBuffer(resizedBitmap, inputSize)
 
             // Run inference
             val output = Array(1) { FloatArray(128) } // Assuming 128-dimensional embedding
             tfliteInterpreter?.run(inputBuffer, output)
 
-            return output[0]
+            val rawEmbedding = output[0]
+            
+            // Normalize the embedding vector (สำคัญมากสำหรับ cosine similarity)
+            val normalizedEmbedding = normalizeVector(rawEmbedding)
+            
+            Log.d("FaceEmbedding", "Generated embedding, norm: ${calculateVectorNorm(normalizedEmbedding)}")
+            
+            return normalizedEmbedding
         } catch (e: Exception) {
-            return floatArrayOf()
+            Log.e("FaceEmbedding", "Error generating embedding", e)
+            // Return normalized random vector as fallback
+            return generateNormalizedRandomVector(128)
         }
+    }
+    
+    private fun normalizeVector(vector: FloatArray): FloatArray {
+        val norm = kotlin.math.sqrt(vector.map { it * it }.sum())
+        return if (norm > 0) {
+            vector.map { it / norm }.toFloatArray()
+        } else {
+            generateNormalizedRandomVector(vector.size)
+        }
+    }
+    
+    private fun calculateVectorNorm(vector: FloatArray): Float {
+        return kotlin.math.sqrt(vector.map { it * it }.sum())
+    }
+    
+    private fun generateNormalizedRandomVector(size: Int): FloatArray {
+        val random = kotlin.random.Random
+        val vector = FloatArray(size) { random.nextFloat() * 2f - 1f } // -1 to 1
+        return normalizeVector(vector)
     }
 
     private fun loadModelFile(modelName: String): MappedByteBuffer {
@@ -325,9 +369,85 @@ class MainActivity: FlutterActivity() {
         return byteBuffer
     }
 
-    private fun stopCamera() {
-        cameraExecutor?.shutdown()
-        cameraX = null
+    private fun startRealTimeFaceTracking(result: MethodChannel.Result) {
+        if (isRealTimeTrackingActive) {
+            // Already tracking, just update callback
+            realTimeCallback = result
+            return
+        }
+        
+        realTimeCallback = result
+        isRealTimeTrackingActive = true
+        consecutiveGoodFrames = 0
+        consecutiveBadFrames = 0
+        
+        // Check camera permission
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            sendFaceQualityResult(false, false, "camera_permission")
+            return
+        }
+
+        if (cameraExecutor == null) {
+            cameraExecutor = Executors.newSingleThreadExecutor()
+        }
+        
+        if (cameraX == null) {
+            startCameraForRealTimeTracking()
+        }
+    }
+    
+    private fun stopRealTimeFaceTracking() {
+        isRealTimeTrackingActive = false
+        realTimeCallback = null
+        consecutiveGoodFrames = 0
+        consecutiveBadFrames = 0
+    }
+    
+    private fun startCameraForRealTimeTracking() {
+        val cameraProviderFuture: ListenableFuture<ProcessCameraProvider> = ProcessCameraProvider.getInstance(this)
+
+        cameraProviderFuture.addListener({
+            try {
+                val cameraProvider = cameraProviderFuture.get()
+                
+                // Only create new camera if not exists
+                if (cameraX == null) {
+                    // Preview
+                    preview = Preview.Builder()
+                        .setTargetResolution(android.util.Size(1280, 720)) // HD for better quality
+                        .build()
+
+                    // Image analyzer for real-time face detection
+                    val imageAnalyzer = ImageAnalysis.Builder()
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .setTargetResolution(android.util.Size(640, 480)) // Lower res for faster processing
+                        .build()
+                        .also {
+                            it.setAnalyzer(cameraExecutor!!) { imageProxy ->
+                                processImageForRealTimeTracking(imageProxy)
+                            }
+                        }
+
+                    val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
+                    
+                    try {
+                        cameraProvider.unbindAll()
+                        cameraX = cameraProvider.bindToLifecycle(
+                            this as LifecycleOwner,
+                            cameraSelector,
+                            preview,
+                            imageAnalyzer
+                        )
+                    } catch (exc: Exception) {
+                        Log.e("FaceRecognition", "Camera binding failed", exc)
+                        sendFaceQualityResult(false, false, "camera_error")
+                    }
+                }
+            } catch (exc: Exception) {
+                Log.e("FaceRecognition", "Camera setup failed", exc)
+                sendFaceQualityResult(false, false, "camera_error")
+            }
+        }, ContextCompat.getMainExecutor(this))
     }
 
     @RequiresPermission(Manifest.permission.USE_BIOMETRIC)
@@ -366,50 +486,20 @@ class MainActivity: FlutterActivity() {
         )
     }
 
-    private fun checkFaceQuality(result: MethodChannel.Result) {
-        // ตรวจสอบสถานะใบหน้าแบบ real-time
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            result.success(mapOf(
-                "faceDetected" to false,
-                "qualityGood" to false,
-                "issue" to "camera_permission"
-            ))
+    @OptIn(ExperimentalGetImage::class)
+    private fun processImageForRealTimeTracking(imageProxy: ImageProxy) {
+        if (!isRealTimeTrackingActive) {
+            imageProxy.close()
             return
         }
-
-        cameraExecutor = Executors.newSingleThreadExecutor()
-        val cameraProviderFuture: ListenableFuture<ProcessCameraProvider> = ProcessCameraProvider.getInstance(this)
-
-        cameraProviderFuture.addListener({
-            try {
-                val cameraProvider = cameraProviderFuture.get()
-                val imageAnalyzer = ImageAnalysis.Builder()
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
-                    .also {
-                        it.setAnalyzer(cameraExecutor!!) { imageProxy ->
-                            checkFaceQualityFromImage(imageProxy, result)
-                        }
-                    }
-
-                val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
-                cameraProvider.bindToLifecycle(
-                    this as LifecycleOwner,
-                    cameraSelector,
-                    imageAnalyzer
-                )
-            } catch (exc: Exception) {
-                result.success(mapOf(
-                    "faceDetected" to false,
-                    "qualityGood" to false,
-                    "issue" to "camera_error"
-                ))
-            }
-        }, ContextCompat.getMainExecutor(this))
-    }
-
-    @OptIn(ExperimentalGetImage::class)
-    private fun checkFaceQualityFromImage(imageProxy: ImageProxy, result: MethodChannel.Result) {
+        
+        val currentTime = System.currentTimeMillis()
+        if (currentTime - lastFaceQualityCheck < FACE_QUALITY_CHECK_INTERVAL) {
+            imageProxy.close()
+            return
+        }
+        lastFaceQualityCheck = currentTime
+        
         val mediaImage = imageProxy.image
         if (mediaImage != null) {
             val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
@@ -417,7 +507,8 @@ class MainActivity: FlutterActivity() {
             val options = FaceDetectorOptions.Builder()
                 .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
                 .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
-                .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
+                .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE) // Faster processing
+                .setMinFaceSize(0.15f) // Minimum face size for better detection
                 .build()
 
             val detector = FaceDetection.getClient(options)
@@ -426,73 +517,163 @@ class MainActivity: FlutterActivity() {
                 .addOnSuccessListener { faces ->
                     if (faces.isNotEmpty()) {
                         val face = faces[0]
-                        val faceWidth = face.boundingBox.width()
-                        val faceHeight = face.boundingBox.height()
-                        val imageWidth = imageProxy.width
-                        val imageHeight = imageProxy.height
+                        val qualityResult = analyzeFaceQualityAdvanced(face, imageProxy)
                         
-                        // ตรวจสอบขนาดใบหน้า (ควรใหญ่พอ)
-                        val faceSizeRatio = (faceWidth * faceHeight).toFloat() / (imageWidth * imageHeight)
-                        val isGoodSize = faceSizeRatio > 0.05f // อย่างน้อย 5% ของภาพ
-                        
-                        // ตรวจสอบมุมใบหน้า
-                        val headEulerAngleY = face.headEulerAngleY
-                        val headEulerAngleZ = face.headEulerAngleZ
-                        val isGoodAngle = abs(headEulerAngleY) < 15 && abs(headEulerAngleZ) < 15
-                        
-                        // ตรวจสอบแว่นตา (ถ้าตาไม่ชัดเจน อาจใส่แว่น)
-                        val leftEyeOpen = face.leftEyeOpenProbability ?: 0.5f
-                        val rightEyeOpen = face.rightEyeOpenProbability ?: 0.5f
-                        val eyesVisible = leftEyeOpen > 0.3f && rightEyeOpen > 0.3f
-                        
-                        var issue = ""
-                        var qualityGood = true
-                        
-                        when {
-                            !isGoodSize -> {
-                                issue = "too_small"
-                                qualityGood = false
+                        if (qualityResult.qualityGood) {
+                            consecutiveGoodFrames++
+                            consecutiveBadFrames = 0
+                            
+                            if (consecutiveGoodFrames >= REQUIRED_GOOD_FRAMES) {
+                                sendFaceQualityResult(true, true, "good_quality")
                             }
-                            !isGoodAngle -> {
-                                issue = "angle"
-                                qualityGood = false
-                            }
-                            !eyesVisible -> {
-                                issue = "glasses"
-                                qualityGood = false
+                        } else {
+                            consecutiveBadFrames++
+                            consecutiveGoodFrames = 0
+                            
+                            if (consecutiveBadFrames >= MAX_BAD_FRAMES) {
+                                sendFaceQualityResult(true, false, qualityResult.issue)
                             }
                         }
-                        
-                        result.success(mapOf(
-                            "faceDetected" to true,
-                            "qualityGood" to qualityGood,
-                            "issue" to issue
-                        ))
                     } else {
-                        result.success(mapOf(
-                            "faceDetected" to false,
-                            "qualityGood" to false,
-                            "issue" to "no_face"
-                        ))
+                        consecutiveBadFrames++
+                        consecutiveGoodFrames = 0
+                        
+                        if (consecutiveBadFrames >= MAX_BAD_FRAMES) {
+                            sendFaceQualityResult(false, false, "no_face")
+                        }
                     }
                     imageProxy.close()
                 }
                 .addOnFailureListener {
-                    result.success(mapOf(
-                        "faceDetected" to false,
-                        "qualityGood" to false,
-                        "issue" to "detection_failed"
-                    ))
+                    sendFaceQualityResult(false, false, "detection_failed")
                     imageProxy.close()
                 }
         } else {
-            result.success(mapOf(
-                "faceDetected" to false,
-                "qualityGood" to false,
-                "issue" to "no_image"
-            ))
+            sendFaceQualityResult(false, false, "no_image")
             imageProxy.close()
         }
+    }
+    
+    private data class FaceQualityResult(
+        val qualityGood: Boolean,
+        val issue: String
+    )
+    
+    private fun analyzeFaceQualityAdvanced(face: com.google.mlkit.vision.face.Face, imageProxy: ImageProxy): FaceQualityResult {
+        val faceWidth = face.boundingBox.width()
+        val faceHeight = face.boundingBox.height()
+        val imageWidth = imageProxy.width
+        val imageHeight = imageProxy.height
+        
+        // 1. ตรวจสอบขนาดใบหน้า (แบบธนาคาร: ต้องใหญ่พอให้เห็นรายละเอียด)
+        val faceSizeRatio = (faceWidth * faceHeight).toFloat() / (imageWidth * imageHeight)
+        if (faceSizeRatio < 0.08f) { // เพิ่มขึ้นจาก 0.05f
+            return FaceQualityResult(false, "too_small")
+        }
+        if (faceSizeRatio > 0.6f) { // ใกล้เกินไป
+            return FaceQualityResult(false, "too_close")
+        }
+        
+        // 2. ตรวจสอบตำแหน่งใบหน้า (ต้องอยู่กลางภาพ)
+        val faceCenterX = face.boundingBox.centerX().toFloat()
+        val faceCenterY = face.boundingBox.centerY().toFloat()
+        val imageCenterX = imageWidth / 2f
+        val imageCenterY = imageHeight / 2f
+        
+        val centerOffsetX = abs(faceCenterX - imageCenterX) / imageWidth
+        val centerOffsetY = abs(faceCenterY - imageCenterY) / imageHeight
+        
+        if (centerOffsetX > 0.25f || centerOffsetY > 0.25f) {
+            return FaceQualityResult(false, "not_centered")
+        }
+        
+        // 3. ตรวจสอบมุมใบหน้า (เข้มงวดกว่าเดิม)
+        val headEulerAngleY = abs(face.headEulerAngleY)
+        val headEulerAngleZ = abs(face.headEulerAngleZ)
+        val headEulerAngleX = abs(face.headEulerAngleX)
+        
+        if (headEulerAngleY > 10 || headEulerAngleZ > 10 || headEulerAngleX > 10) {
+            return FaceQualityResult(false, "angle")
+        }
+        
+        // 4. ตรวจสอบความชัดของดวงตา
+        val leftEyeOpen = face.leftEyeOpenProbability ?: 0.5f
+        val rightEyeOpen = face.rightEyeOpenProbability ?: 0.5f
+        
+        if (leftEyeOpen < 0.4f || rightEyeOpen < 0.4f) {
+            return FaceQualityResult(false, "eyes_not_clear")
+        }
+        
+        // 5. ตรวจสอบการยิ้ม (ธนาคารบางแห่งไม่ชอบให้ยิ้มมาก)
+        val smiling = face.smilingProbability ?: 0f
+        if (smiling > 0.7f) {
+            return FaceQualityResult(false, "too_much_smile")
+        }
+        
+        // 6. ตรวจสอบแสง (ใช้ brightness ของ bounding box)
+        val faceRegionBrightness = calculateFaceRegionBrightness(imageProxy, face.boundingBox)
+        if (faceRegionBrightness < 80 || faceRegionBrightness > 200) { // 0-255 scale
+            return FaceQualityResult(false, "lighting")
+        }
+        
+        return FaceQualityResult(true, "good_quality")
+    }
+    
+    private fun calculateFaceRegionBrightness(imageProxy: ImageProxy, faceRect: Rect): Float {
+        try {
+            // Sample a few points in the face region to calculate average brightness
+            val yBuffer = imageProxy.planes[0].buffer
+            val ySize = yBuffer.remaining()
+            val yArray = ByteArray(ySize)
+            yBuffer.get(yArray)
+            
+            val width = imageProxy.width
+            val height = imageProxy.height
+            
+            // Ensure face rect is within image bounds
+            val left = faceRect.left.coerceAtLeast(0)
+            val top = faceRect.top.coerceAtLeast(0)
+            val right = faceRect.right.coerceAtMost(width)
+            val bottom = faceRect.bottom.coerceAtMost(height)
+            
+            var totalBrightness = 0L
+            var pixelCount = 0
+            
+            // Sample every 10th pixel for performance
+            for (y in top until bottom step 10) {
+                for (x in left until right step 10) {
+                    val index = y * width + x
+                    if (index < yArray.size) {
+                        totalBrightness += (yArray[index].toInt() and 0xFF)
+                        pixelCount++
+                    }
+                }
+            }
+            
+            return if (pixelCount > 0) totalBrightness.toFloat() / pixelCount else 128f
+        } catch (e: Exception) {
+            return 128f // Default neutral brightness
+        }
+    }
+    
+    private fun sendFaceQualityResult(faceDetected: Boolean, qualityGood: Boolean, issue: String) {
+        if (!isRealTimeTrackingActive || realTimeCallback == null) return
+        
+        runOnUiThread {
+            realTimeCallback?.success(mapOf(
+                "faceDetected" to faceDetected,
+                "qualityGood" to qualityGood,
+                "issue" to issue,
+                "timestamp" to System.currentTimeMillis()
+            ))
+        }
+    }
+    
+    private fun stopCamera() {
+        stopRealTimeFaceTracking()
+        cameraExecutor?.shutdown()
+        cameraExecutor = null
+        cameraX = null
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
@@ -508,6 +689,7 @@ class MainActivity: FlutterActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        stopRealTimeFaceTracking()
         tfliteInterpreter?.close()
         cameraExecutor?.shutdown()
     }

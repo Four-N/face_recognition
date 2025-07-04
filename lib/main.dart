@@ -352,63 +352,81 @@ class _RegisterFaceScreenState extends State<RegisterFaceScreen>
   }
 
   void _startFaceDetection() {
-    // เริ่มตรวจสอบใบหน้าแบบ real-time
-    _faceDetectionTimer = Timer.periodic(Duration(milliseconds: 500), (timer) {
-      if (!_isScanning &&
-          _controller != null &&
-          _controller!.value.isInitialized) {
-        _checkFaceQuality();
-      }
-    });
+    // เริ่มตรวจสอบใบหน้าแบบ real-time (ส่งครั้งเดียวแล้วรับ continuous updates)
+    _checkFaceQuality();
   }
 
   Future<void> _checkFaceQuality() async {
     try {
-      // ตรวจสอบสถานะใบหน้าจาก native
+      // เริ่ม real-time face tracking
       final result = await platform.invokeMethod('checkFaceQuality');
       if (result != null && result is Map) {
-        setState(() {
-          _faceDetected = result['faceDetected'] ?? false;
-          _faceQualityGood = result['qualityGood'] ?? false;
-
-          if (!_faceDetected) {
-            _faceStatus = 'ไม่พบใบหน้า - กรุณาเข้าไปในกรอบ';
-            _instruction = 'กรุณาจัดตำแหน่งใบหน้าในกรอบ';
-          } else if (!_faceQualityGood) {
-            String issue = result['issue'] ?? 'ไม่ชัดเจน';
-            if (issue.contains('glasses')) {
-              _faceStatus = 'กรุณาถอดแว่นตา';
-              _instruction = 'ตรวจพบแว่นตา - กรุณาถอดแว่นเพื่อความชัดเจน';
-            } else if (issue.contains('lighting')) {
-              _faceStatus = 'แสงไม่เพียงพอ';
-              _instruction = 'กรุณาไปที่มีแสงสว่างเพียงพอ';
-            } else if (issue.contains('angle')) {
-              _faceStatus = 'มุมไม่เหมาะสม';
-              _instruction = 'กรุณาหันหน้าตรงเข้าหากล้อง';
-            } else {
-              _faceStatus = 'ใบหน้าไม่ชัดเจน';
-              _instruction = 'กรุณาเข้าใกล้และจัดตำแหน่งใบหน้าให้ชัดเจน';
-            }
-          } else {
-            _faceStatus = 'ใบหน้าชัดเจน - พร้อมสแกน';
-            _instruction = 'ใบหน้าชัดเจน - ระบบจะเริ่มสแกนใน 2 วินาที';
-
-            // เริ่มสแกนอัตโนมัติเมื่อใบหน้าชัดเจน
-            if (!_autoScanStarted && !_isScanning) {
-              _autoScanStarted = true;
-              Timer(Duration(seconds: 2), () {
-                if (mounted && _faceQualityGood && !_isScanning) {
-                  _scanFace();
-                }
-              });
-            }
-          }
-        });
+        _processFaceQualityResult(Map<String, dynamic>.from(result));
       }
     } catch (e) {
       print('checkFaceQuality error: $e');
       // สำหรับการทดสอบ: สร้างสถานะจำลอง
       _simulateFaceDetection();
+    }
+  }
+
+  void _processFaceQualityResult(Map<String, dynamic> result) {
+    if (!mounted) return;
+
+    setState(() {
+      _faceDetected = result['faceDetected'] ?? false;
+      _faceQualityGood = result['qualityGood'] ?? false;
+
+      if (!_faceDetected) {
+        _faceStatus = 'ไม่พบใบหน้า - กรุณาเข้าไปในกรอบ';
+        _instruction = 'กรุณาจัดตำแหน่งใบหน้าในกรอบ';
+      } else if (!_faceQualityGood) {
+        String issue = result['issue'] ?? 'ไม่ชัดเจน';
+        if (issue.contains('glasses') || issue.contains('eyes_not_clear')) {
+          _faceStatus = 'กรุณาถอดแว่นตา';
+          _instruction = 'ตรวจพบแว่นตา - กรุณาถอดแว่นเพื่อความชัดเจน';
+        } else if (issue.contains('lighting')) {
+          _faceStatus = 'แสงไม่เพียงพอ';
+          _instruction = 'กรุณาไปที่มีแสงสว่างเพียงพอ';
+        } else if (issue.contains('angle')) {
+          _faceStatus = 'มุมไม่เหมาะสม';
+          _instruction = 'กรุณาหันหน้าตรงเข้าหากล้อง';
+        } else if (issue.contains('too_small')) {
+          _faceStatus = 'ใบหน้าเล็กเกินไป';
+          _instruction = 'กรุณาเข้าใกล้กล้องมากขึ้น';
+        } else if (issue.contains('too_close')) {
+          _faceStatus = 'ใกล้เกินไป';
+          _instruction = 'กรุณาถอยห่างจากกล้อง';
+        } else if (issue.contains('not_centered')) {
+          _faceStatus = 'ไม่อยู่กลางกรอบ';
+          _instruction = 'กรุณาจัดตำแหน่งใบหน้าให้อยู่กลางกรอบ';
+        } else {
+          _faceStatus = 'ใบหน้าไม่ชัดเจน';
+          _instruction = 'กรุณาเข้าใกล้และจัดตำแหน่งใบหน้าให้ชัดเจน';
+        }
+      } else {
+        _faceStatus = 'ใบหน้าชัดเจน - พร้อมสแกน';
+        _instruction = 'ใบหน้าชัดเจน - ระบบจะเริ่มสแกนใน 2 วินาที';
+
+        // เริ่มสแกนอัตโนมัติเมื่อใบหน้าชัดเจน
+        if (!_autoScanStarted && !_isScanning) {
+          _autoScanStarted = true;
+          Timer(Duration(seconds: 2), () {
+            if (mounted && _faceQualityGood && !_isScanning) {
+              _scanFace();
+            }
+          });
+        }
+      }
+    });
+
+    // เรียก checkFaceQuality อีกครั้งเพื่อ continuous tracking (หลังจาก delay เล็กน้อย)
+    if (!_isScanning && mounted) {
+      Timer(Duration(milliseconds: 200), () {
+        if (mounted && !_isScanning) {
+          _checkFaceQuality();
+        }
+      });
     }
   }
 
@@ -769,9 +787,12 @@ class _RegisterFaceScreenState extends State<RegisterFaceScreen>
   void dispose() {
     _timeoutTimer?.cancel();
     _faceDetectionTimer?.cancel();
-    _progressController
-        .dispose(); // Dispose animation controller for RegisterFaceScreen
+    _progressController.dispose();
     _controller?.dispose();
+    // Stop native face tracking
+    platform.invokeMethod('stopFaceTracking').catchError((e) {
+      print('Error stopping face tracking: $e');
+    });
     super.dispose();
   }
 
@@ -1107,63 +1128,81 @@ class _VerifyFaceScreenState extends State<VerifyFaceScreen> {
   }
 
   void _startFaceDetection() {
-    // เริ่มตรวจสอบใบหน้าแบบ real-time
-    _faceDetectionTimer = Timer.periodic(Duration(milliseconds: 500), (timer) {
-      if (!_isScanning &&
-          _controller != null &&
-          _controller!.value.isInitialized) {
-        _checkFaceQuality();
-      }
-    });
+    // เริ่มตรวจสอบใบหน้าแบบ real-time (ส่งครั้งเดียวแล้วรับ continuous updates)
+    _checkFaceQuality();
   }
 
   Future<void> _checkFaceQuality() async {
     try {
-      // ตรวจสอบสถานะใบหน้าจาก native
+      // เริ่ม real-time face tracking
       final result = await platform.invokeMethod('checkFaceQuality');
       if (result != null && result is Map) {
-        setState(() {
-          _faceDetected = result['faceDetected'] ?? false;
-          _faceQualityGood = result['qualityGood'] ?? false;
-
-          if (!_faceDetected) {
-            _faceStatus = 'ไม่พบใบหน้า - กรุณาเข้าไปในกรอบ';
-            _instruction = 'กรุณาจัดตำแหน่งใบหน้าในกรอบ';
-          } else if (!_faceQualityGood) {
-            String issue = result['issue'] ?? 'ไม่ชัดเจน';
-            if (issue.contains('glasses')) {
-              _faceStatus = 'กรุณาถอดแว่นตา';
-              _instruction = 'ตรวจพบแว่นตา - กรุณาถอดแว่นเพื่อความชัดเจน';
-            } else if (issue.contains('lighting')) {
-              _faceStatus = 'แสงไม่เพียงพอ';
-              _instruction = 'กรุณาไปที่มีแสงสว่างเพียงพอ';
-            } else if (issue.contains('angle')) {
-              _faceStatus = 'มุมไม่เหมาะสม';
-              _instruction = 'กรุณาหันหน้าตรงเข้าหากล้อง';
-            } else {
-              _faceStatus = 'ใบหน้าไม่ชัดเจน';
-              _instruction = 'กรุณาเข้าใกล้และจัดตำแหน่งใบหน้าให้ชัดเจน';
-            }
-          } else {
-            _faceStatus = 'ใบหน้าชัดเจน - พร้อมยืนยัน';
-            _instruction = 'ใบหน้าชัดเจน - ระบบจะเริ่มยืนยันใน 2 วินาที';
-
-            // เริ่มสแกนอัตโนมัติเมื่อใบหน้าชัดเจน
-            if (!_autoScanStarted && !_isScanning) {
-              _autoScanStarted = true;
-              Timer(Duration(seconds: 2), () {
-                if (mounted && _faceQualityGood && !_isScanning) {
-                  _scanFace();
-                }
-              });
-            }
-          }
-        });
+        _processFaceQualityResult(Map<String, dynamic>.from(result));
       }
     } catch (e) {
       print('checkFaceQuality error: $e');
       // สำหรับการทดสอบ: สร้างสถานะจำลอง
       _simulateFaceDetection();
+    }
+  }
+
+  void _processFaceQualityResult(Map<String, dynamic> result) {
+    if (!mounted) return;
+
+    setState(() {
+      _faceDetected = result['faceDetected'] ?? false;
+      _faceQualityGood = result['qualityGood'] ?? false;
+
+      if (!_faceDetected) {
+        _faceStatus = 'ไม่พบใบหน้า - กรุณาเข้าไปในกรอบ';
+        _instruction = 'กรุณาจัดตำแหน่งใบหน้าในกรอบ';
+      } else if (!_faceQualityGood) {
+        String issue = result['issue'] ?? 'ไม่ชัดเจน';
+        if (issue.contains('glasses') || issue.contains('eyes_not_clear')) {
+          _faceStatus = 'กรุณาถอดแว่นตา';
+          _instruction = 'ตรวจพบแว่นตา - กรุณาถอดแว่นเพื่อความชัดเจน';
+        } else if (issue.contains('lighting')) {
+          _faceStatus = 'แสงไม่เพียงพอ';
+          _instruction = 'กรุณาไปที่มีแสงสว่างเพียงพอ';
+        } else if (issue.contains('angle')) {
+          _faceStatus = 'มุมไม่เหมาะสม';
+          _instruction = 'กรุณาหันหน้าตรงเข้าหากล้อง';
+        } else if (issue.contains('too_small')) {
+          _faceStatus = 'ใบหน้าเล็กเกินไป';
+          _instruction = 'กรุณาเข้าใกล้กล้องมากขึ้น';
+        } else if (issue.contains('too_close')) {
+          _faceStatus = 'ใกล้เกินไป';
+          _instruction = 'กรุณาถอยห่างจากกล้อง';
+        } else if (issue.contains('not_centered')) {
+          _faceStatus = 'ไม่อยู่กลางกรอบ';
+          _instruction = 'กรุณาจัดตำแหน่งใบหน้าให้อยู่กลางกรอบ';
+        } else {
+          _faceStatus = 'ใบหน้าไม่ชัดเจน';
+          _instruction = 'กรุณาเข้าใกล้และจัดตำแหน่งใบหน้าให้ชัดเจน';
+        }
+      } else {
+        _faceStatus = 'ใบหน้าชัดเจน - พร้อมยืนยัน';
+        _instruction = 'ใบหน้าชัดเจน - ระบบจะเริ่มยืนยันใน 2 วินาที';
+
+        // เริ่มสแกนอัตโนมัติเมื่อใบหน้าชัดเจน
+        if (!_autoScanStarted && !_isScanning) {
+          _autoScanStarted = true;
+          Timer(Duration(seconds: 2), () {
+            if (mounted && _faceQualityGood && !_isScanning) {
+              _scanFace();
+            }
+          });
+        }
+      }
+    });
+
+    // เรียก checkFaceQuality อีกครั้งเพื่อ continuous tracking (หลังจาก delay เล็กน้อย)
+    if (!_isScanning && mounted) {
+      Timer(Duration(milliseconds: 200), () {
+        if (mounted && !_isScanning) {
+          _checkFaceQuality();
+        }
+      });
     }
   }
 
@@ -1604,6 +1643,10 @@ class _VerifyFaceScreenState extends State<VerifyFaceScreen> {
     _timeoutTimer?.cancel();
     _faceDetectionTimer?.cancel();
     _controller?.dispose();
+    // Stop native face tracking
+    platform.invokeMethod('stopFaceTracking').catchError((e) {
+      print('Error stopping face tracking: $e');
+    });
     super.dispose();
   }
 
