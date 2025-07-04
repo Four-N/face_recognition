@@ -622,6 +622,7 @@ class _RegisterFaceScreenState extends State<RegisterFaceScreen>
   }
 
   Future<void> _simulateSuccessfulScan() async {
+    print('DEBUG: Starting registration simulation...');
     // จำลองการสแกนสำเร็จสำหรับการทดสอบ
     await Future.delayed(Duration(milliseconds: 500));
 
@@ -635,15 +636,26 @@ class _RegisterFaceScreenState extends State<RegisterFaceScreen>
       return value;
     });
 
+    print('DEBUG: Generated mock vector length: ${mockVector.length}');
+    print(
+      'DEBUG: Mock vector first 5 elements before normalization: ${mockVector.take(5).toList()}',
+    );
+
     // Normalize vector เพื่อให้การคำนวณ similarity ถูกต้อง
     double norm = math.sqrt(
       mockVector.fold(0.0, (sum, val) => sum + val * val),
     );
+    print('DEBUG: Mock vector norm before normalization: $norm');
+
     if (norm > 0) {
       for (int i = 0; i < mockVector.length; i++) {
         mockVector[i] = mockVector[i] / norm;
       }
     }
+
+    print(
+      'DEBUG: Mock vector first 5 elements after normalization: ${mockVector.take(5).toList()}',
+    );
 
     await _storage.write(key: 'face_vector', value: jsonEncode(mockVector));
     await _storage.write(key: 'liveness_passed', value: 'true');
@@ -651,6 +663,8 @@ class _RegisterFaceScreenState extends State<RegisterFaceScreen>
       key: 'face_registered_at',
       value: DateTime.now().toIso8601String(),
     );
+
+    print('DEBUG: Stored vector in storage');
 
     setState(() {
       _instruction = 'ลงทะเบียนสำเร็จ! ✅';
@@ -1375,6 +1389,7 @@ class _VerifyFaceScreenState extends State<VerifyFaceScreen> {
   }
 
   Future<void> _simulateSuccessfulVerification() async {
+    print('DEBUG: Starting simulation...');
     // จำลองการยืนยันสำเร็จสำหรับการทดสอบ
     await Future.delayed(Duration(milliseconds: 500));
 
@@ -1383,30 +1398,65 @@ class _VerifyFaceScreenState extends State<VerifyFaceScreen> {
     // ตรวจสอบว่ามีข้อมูลใบหน้าที่ลงทะเบียนไว้หรือไม่
     final storedVectorJson = await _storage.read(key: 'face_vector');
     if (storedVectorJson != null) {
+      print('DEBUG: Found stored vector JSON');
       final storedVector = jsonDecode(storedVectorJson);
+      print('DEBUG: Stored vector length: ${storedVector.length}');
+      print(
+        'DEBUG: Stored vector first 5 elements: ${storedVector.take(5).toList()}',
+      );
+
+      // แปลง stored vector เป็น List<double> และ normalize (เผื่อว่าไม่ได้ normalize)
+      final storedVectorDoubles = List<double>.from(
+        storedVector.map((e) => e.toDouble()),
+      );
+      double storedNorm = math.sqrt(
+        storedVectorDoubles.fold(0.0, (sum, val) => sum + val * val),
+      );
+      print('DEBUG: Stored vector norm: $storedNorm');
+
+      if (storedNorm > 0) {
+        for (int i = 0; i < storedVectorDoubles.length; i++) {
+          storedVectorDoubles[i] = storedVectorDoubles[i] / storedNorm;
+        }
+      }
+      print(
+        'DEBUG: Stored vector normalized first 5 elements: ${storedVectorDoubles.take(5).toList()}',
+      );
 
       // สร้าง face vector ใหม่ที่คล้ายกับของเดิม (จำลองการสแกนใบหน้าเดียวกัน)
       final random = math.Random();
       final newVector = List<double>.from(
-        storedVector.map((val) {
+        storedVectorDoubles.map((val) {
           // เพิ่ม noise เล็กน้อยเพื่อจำลองการสแกนจริง (±5%)
           double noise = (random.nextDouble() - 0.5) * 0.1; // ±5% noise
-          return (val as double) + noise;
+          return val + noise;
         }),
+      );
+
+      print('DEBUG: New vector length: ${newVector.length}');
+      print(
+        'DEBUG: New vector first 5 elements: ${newVector.take(5).toList()}',
       );
 
       // Normalize vector ใหม่
       double norm = math.sqrt(
         newVector.fold(0.0, (sum, val) => sum + val * val),
       );
+      print('DEBUG: New vector norm before normalization: $norm');
+
       if (norm > 0) {
         for (int i = 0; i < newVector.length; i++) {
           newVector[i] = newVector[i] / norm;
         }
       }
 
+      print(
+        'DEBUG: New vector normalized first 5 elements: ${newVector.take(5).toList()}',
+      );
+
       // คำนวณความคล้ายจริง
-      final similarity = _calculateSimilarity(newVector, storedVector);
+      final similarity = _calculateSimilarity(newVector, storedVectorDoubles);
+      print('DEBUG: Similarity result: $similarity');
 
       setState(() {
         _instruction = 'ยืนยันตัวตนสำเร็จ! ✅';
@@ -1416,12 +1466,20 @@ class _VerifyFaceScreenState extends State<VerifyFaceScreen> {
       _timeoutTimer?.cancel();
       _showSuccessDialog(similarity);
     } else {
+      print('DEBUG: No stored vector found');
       _showFailureDialog('ไม่พบข้อมูลใบหน้าที่ลงทะเบียนไว้');
     }
   }
 
   double _calculateSimilarity(List<dynamic> vector1, List<dynamic> vector2) {
-    if (vector1.length != vector2.length) return 0.0;
+    print('DEBUG: Calculating similarity...');
+    print('DEBUG: Vector1 length: ${vector1.length}');
+    print('DEBUG: Vector2 length: ${vector2.length}');
+
+    if (vector1.length != vector2.length) {
+      print('DEBUG: Vector lengths differ, returning 0.0');
+      return 0.0;
+    }
 
     double dotProduct = 0.0;
     double norm1 = 0.0;
@@ -1435,9 +1493,20 @@ class _VerifyFaceScreenState extends State<VerifyFaceScreen> {
       norm2 += v2 * v2;
     }
 
-    if (norm1 == 0.0 || norm2 == 0.0) return 0.0;
+    print('DEBUG: DotProduct: $dotProduct');
+    print('DEBUG: Norm1: $norm1, Norm2: $norm2');
+    print(
+      'DEBUG: Sqrt(Norm1): ${math.sqrt(norm1)}, Sqrt(Norm2): ${math.sqrt(norm2)}',
+    );
 
-    return dotProduct / (math.sqrt(norm1) * math.sqrt(norm2));
+    if (norm1 == 0.0 || norm2 == 0.0) {
+      print('DEBUG: One of the norms is 0, returning 0.0');
+      return 0.0;
+    }
+
+    double similarity = dotProduct / (math.sqrt(norm1) * math.sqrt(norm2));
+    print('DEBUG: Final similarity: $similarity');
+    return similarity;
   }
 
   void _stopScanning() {
@@ -1528,6 +1597,14 @@ class _VerifyFaceScreenState extends State<VerifyFaceScreen> {
             ],
           ),
     );
+  }
+
+  @override
+  void dispose() {
+    _timeoutTimer?.cancel();
+    _faceDetectionTimer?.cancel();
+    _controller?.dispose();
+    super.dispose();
   }
 
   @override
